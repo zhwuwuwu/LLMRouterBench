@@ -3,11 +3,11 @@
 
 # Embedding model configuration
 embedding_model:
-  name: gte_Qwen2-7B-instruct # bge-m3, gte_Qwen2-7B-instruct, Qwen3-Embedding-8B
-  api_model_name: gte_Qwen2-7B-instruct # bge-m3, gte_Qwen2-7B-instruct, Qwen3-Embedding-8B
+  name: text-embedding-3-large # bge-m3, gte_Qwen2-7B-instruct, Qwen3-Embedding-8B
+  api_model_name: text-embedding-3-large # bge-m3, gte_Qwen2-7B-instruct, Qwen3-Embedding-8B
   generator_type: embedding
-  base_url: https://sd3g8mam6uj313gtp0fbg.apigateway-cn-beijing.volceapi.com/v1
-  api_key: HUOSHAN_API_KEY  # Will be read from environment variable
+  base_url: http://model-service.aihub.intel.com/v1
+  api_key: OPENAI_API_KEY  # Will be read from environment variable
   timeout: 600
   max_context_length: 25000
 
