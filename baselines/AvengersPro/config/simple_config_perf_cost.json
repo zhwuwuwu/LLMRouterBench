@@ -1,0 +1,19 @@
+{
+  "train_data_path": "baselines/AvengersPro/data/perf_cost_seed_42/seed42_split0.7/train.jsonl",
+  "test_data_path": "baselines/AvengersPro/data/perf_cost_seed_42/seed42_split0.7/test.jsonl",
+  "baseline_scores_path": "baselines/AvengersPro/data/perf_cost_seed_42/seed42_split0.7/baseline_scores.json",
+  "n_clusters": 16,
+  "seed": 42,
+  "max_router": 1,
+  "top_k": 1,
+  "beta": 9.0,
+  "max_workers": 32,
+  "cluster_batch_size": 1000,
+  "max_tokens": 30000,
+  "embedding_model": "text-embedding-3-large",
+  "embedding_base_url": "http://model-service.aihub.intel.com/v1",
+  "embedding_api_key": "OPENAI_API_KEY",
+  "embedding_config_path": "config/embedding_config.yaml",
+  "excluded_models": [],
+  "ood_datasets": []
+}
