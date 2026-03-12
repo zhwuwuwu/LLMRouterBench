@@ -65,7 +65,7 @@ class DirectGenerator:
     
     def _initialize_client(self):
         """Initialize or reinitialize the OpenAI client"""
-        if "21020" in self.base_url: # For AILAB only
+        if "21020" in self.base_url or "superrouter" in self.base_url: # For AILAB and SuperRouter (self-signed cert)
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
