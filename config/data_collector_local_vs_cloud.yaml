@@ -48,7 +48,7 @@ datasets:
 run:
   output_dir: ./results
   overwrite: false
-  concurrency: 8
+  concurrency: 1
   log_level: INFO
 
 cache:
