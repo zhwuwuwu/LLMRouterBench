@@ -1,0 +1,37 @@
+# Baseline Configuration for Local vs Cloud Router Experiment
+# Models: qwen3-coder-next (local) vs qwen3.5-35b-a3b (cloud)
+# Datasets: Code-focused + General reasoning
+
+baseline:
+  # Data Source
+  results_dir: "results/bench"
+
+  # Data Filtering
+  filters:
+    skip_demo: true
+
+    # Include only our two models (full verified API names)
+    models: ["qwen3-coder-next-80b-4bit-awq", "qwen3.5-35b-a3b-awq-4b"]
+
+    # Include selected datasets
+    # Math: AIME, LiveMathBench | Code: LiveCodeBench | Knowledge: GPQA, MMLU-Pro
+    datasets: ["aime", "livecodebench", "gpqa", "mmlupro", "livemathbench"]
+
+    # Include splits for these datasets
+    splits: ["hybrid", "test", "test_3000"]
+
+    # No exclusions (whitelist is defined)
+    exclude_datasets: null
+    exclude_models: null
+    exclude_splits: null
+
+  # Column Selection
+  columns:
+    include:
+      - dataset_id
+      - split
+      - model_name
+      - record_index
+      - prompt
+      - score
+      - cost
