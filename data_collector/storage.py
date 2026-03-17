@@ -1,6 +1,7 @@
 import json
 import hashlib
 import time
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -61,8 +62,8 @@ class ResultsStorage:
         if not result_dir.exists():
             return False
         
-        # Check if any result file exists in the directory
-        file_pattern = f"{dataset_id}-{split}-{model_name}-*.json"
+        # Check if any result file exists in the directory (must have timestamp format, not checkpoint files)
+        file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
         return any(result_dir.glob(file_pattern))
     
     def save_result(self, result: BenchmarkResult, dataset_id: str, split: str, model_name: str, data_fingerprint: str = ""):
@@ -107,7 +108,7 @@ class ResultsStorage:
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(result_dict, f, indent=2, ensure_ascii=False)
         
-        temp_path.rename(result_path)
+        os.replace(str(temp_path), str(result_path))
         logger.info(f"Saved result: {result_path}")
     
     def load_result(self, dataset_id: str, split: str, model_name: str) -> Optional[BenchmarkResult]:
@@ -116,8 +117,8 @@ class ResultsStorage:
         if not result_dir.exists():
             return None
         
-        # Find the most recent result file
-        file_pattern = f"{dataset_id}-{split}-{model_name}-*.json"
+        # Find the most recent result file (must have timestamp format YYYYMMDD_HHMMSS, not checkpoint files)
+        file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
         result_files = list(result_dir.glob(file_pattern))
         
         # Also check for legacy result.json files
@@ -222,8 +223,8 @@ class ResultsStorage:
                     split_name = split_dir.name
                     model_name = model_dir.name
                     
-                    # Find timestamped files
-                    file_pattern = f"{dataset_id}-{split_name}-{model_name}-*.json"
+                    # Find timestamped files (must have timestamp format YYYYMMDD_HHMMSS, not checkpoint files)
+                    file_pattern = f"{dataset_id}-{split_name}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
                     result_files = list(model_dir.glob(file_pattern))
 
                     # Also check for legacy result.json
@@ -277,8 +278,8 @@ class ResultsStorage:
         if not result_dir.exists():
             return True
 
-        # Find timestamped files
-        file_pattern = f"{dataset_id}-{split}-{model_name}-*.json"
+        # Find timestamped files (must have timestamp format YYYYMMDD_HHMMSS, not checkpoint files)
+        file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
         result_files = list(result_dir.glob(file_pattern))
 
         # Also check for legacy result.json
