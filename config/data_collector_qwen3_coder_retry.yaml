@@ -1,0 +1,63 @@
+# qwen3-coder-next Retry: arc-agi and korbench
+# Datasets: arc-agi (split: v1), korbench (split: test)
+# Total: 2 datasets | Retry for previously failed collections
+# Reason: arc-agi had API 503 error, korbench had Windows GBK encoding error (now fixed)
+
+models:
+  - name: qwen3-coder-next
+    api_model_name: qwen3-coder-next-80b-4bit-awq
+    base_url: https://superrouter.intel.com/v1
+    api_key: INTEL_SUPERROUTER_API_KEY
+    temperature: 0.2
+    top_p: 1.0
+    timeout: 600
+    pricing:
+      prompt_price_per_million: 0.01
+      completion_price_per_million: 0.01
+
+datasets:
+  # Abstract reasoning capability
+  - dataset_id: arc-agi
+    splits: ["v1"]
+  
+  # Korean language benchmark
+  - dataset_id: korbench
+    splits: ["test"]
+
+run:
+  output_dir: ./results
+  overwrite: false
+  concurrency: 8
+  log_level: INFO
+
+cache:
+  enabled: false
+  force_override_cache: false
+  mysql:
+    host: MYSQL_HOST
+    port: MYSQL_PORT
+    user: MYSQL_USER
+    password: MYSQL_PASSWORD
+    database: local_vs_cloud_cache
+    table_name: generator_output_cache
+    charset: utf8mb4
+    autocommit: true
+    ttl_seconds: null
+
+    use_connection_pool: false
+    pool_size: 4
+    max_overflow: 2
+    pool_timeout: 10
+    pool_recycle: 3600
+
+  key_generator:
+    cached_parameters: ["model", "temperature", "top_p", "messages"]
+    hash_algorithm: blake2b
+    hash_digest_size: 16
+
+  conditions:
+    cache_successful_only: true
+    min_completion_tokens: 0
+
+  log_level: INFO
+  enable_stats: true
