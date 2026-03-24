@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional, List, Union
 import base64
 import os
 import re
+import threading
 from pathlib import Path
 import httpx
 from openai import OpenAI
@@ -80,8 +81,9 @@ class DirectGenerator:
     def _log_retry(self, retry_state):
         exception = retry_state.outcome.exception()
         if exception:
+            thread_name = threading.current_thread().name
             logger.warning(
-                f"Retrying DirectGenerator.generate due to error: {str(exception)}. "
+                f"[{thread_name}] Retrying DirectGenerator.generate due to error: {str(exception)}. "
                 f"Attempt {retry_state.attempt_number}/10"
             )
     
@@ -139,7 +141,18 @@ class DirectGenerator:
             
         except Exception as e:
             error_str = str(e)
-            logger.error(f"Error in DirectGenerator._generate: {error_str}, model: {self.model_name}")
+            thread_name = threading.current_thread().name
+            # Log the root cause chain for connection errors
+            cause_str = ""
+            cause = e.__cause__
+            while cause:
+                cause_str += f" <- {type(cause).__name__}: {cause}"
+                cause = cause.__cause__
+            logger.error(f"[{thread_name}] Error in DirectGenerator._generate: {error_str}{cause_str}, model: {self.model_name}")
+            # Reinitialize client on connection errors to get a fresh connection pool
+            if "connection error" in error_str.lower() or "connect error" in error_str.lower():
+                logger.warning(f"[{thread_name}] Reinitializing client due to connection error for model {self.model_name}")
+                self._initialize_client()
             # Check for sensitive_words_detected error - don't retry
             if "sensitive_words_detected" in error_str.lower():
                 raise NonRetryableError(f"[SENSITIVE_WORDS_DETECTED] {error_str}")
@@ -152,8 +165,9 @@ class DirectGenerator:
                 question+='/no_think'
             return self._generate(question)
         except Exception as e:
+            thread_name = threading.current_thread().name
             logger.error(
-                f"DirectGenerator.generate failed after all retries: {str(e)}, "
+                f"[{thread_name}] DirectGenerator.generate failed after all retries: {str(e)}, "
                 f"model: {self.model_name}"
             )
             return GeneratorOutput(

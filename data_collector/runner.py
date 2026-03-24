@@ -1,8 +1,10 @@
 import re
 import json
+import os
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set, Tuple
 from pathlib import Path
 from loguru import logger
 
@@ -11,6 +13,10 @@ from .planner import RunPlan
 from .storage import ResultsStorage, BenchmarkResult, RecordResult
 from evaluation.factory import EvaluatorFactory
 from generators.factory import create_generator
+
+# Checkpoint constants
+CHECKPOINT_INTERVAL_RECORDS = 50   # Save every N completed records
+CHECKPOINT_INTERVAL_SECONDS = 300  # Save every N seconds (5 min)
 
 
 def extract_field_from_response(response_json: str, path: str) -> Any:
@@ -186,7 +192,10 @@ class BenchmarkRunner:
                 generator=generator,
                 evaluator=evaluator,
                 concurrency=self.config.run.concurrency,
-                model_config=model_config
+                model_config=model_config,
+                dataset_id=plan.dataset_id,
+                split=plan.split,
+                model_name=plan.model_name
             )
             
             # 6. Calculate aggregated statistics
@@ -214,6 +223,9 @@ class BenchmarkRunner:
             # 9. Save result
             self.storage.save_result(result, plan.dataset_id, plan.split, plan.model_name, data_fingerprint)
 
+            # 10. Clean up checkpoint file (no longer needed after successful save)
+            self._delete_checkpoint(plan.dataset_id, plan.split, plan.model_name)
+
             logger.info(f"Completed run {plan.run_key}: {performance:.3f} performance")
 
             # 对 SGI-Bench 数据集输出额外指标汇总
@@ -226,12 +238,169 @@ class BenchmarkRunner:
             logger.error(f"Error executing run {plan.run_key}: {str(e)}")
             raise
     
-    def _process_records_concurrent(self, data: List[Dict[str, Any]], generator, evaluator, concurrency: int, model_config=None) -> List[RecordResult]:
-        """Process records with concurrent execution"""
+    # ─── Checkpoint helpers ───────────────────────────────────────────
+
+    def _checkpoint_path(self, dataset_id: str, split: str, model_name: str) -> Path:
+        """Return the canonical checkpoint file path."""
+        return (self.storage.bench_dir / dataset_id / split / model_name /
+                f"{dataset_id}-{split}-{model_name}-checkpoint.json")
+
+    def _save_checkpoint(
+        self,
+        results: List[Optional[RecordResult]],
+        dataset_id: str,
+        split: str,
+        model_name: str,
+        total_count: int,
+    ) -> None:
+        """Atomically save a checkpoint of completed records so far."""
+        cp_path = self._checkpoint_path(dataset_id, split, model_name)
+        cp_path.parent.mkdir(parents=True, exist_ok=True)
+
+        completed_count = sum(1 for r in results if r is not None)
+        serialized_records = []
+        for r in results:
+            if r is None:
+                serialized_records.append(None)
+            else:
+                serialized_records.append({
+                    "index": r.index,
+                    "origin_query": r.origin_query,
+                    "prompt": r.prompt,
+                    "prompt_tokens": r.prompt_tokens,
+                    "completion_tokens": r.completion_tokens,
+                    "cost": r.cost,
+                    "score": r.score,
+                    "prediction": r.prediction,
+                    "ground_truth": r.ground_truth,
+                    "raw_output": r.raw_output,
+                    "extra_fields": r.extra_fields,
+                })
+
+        payload = {
+            "checkpoint": True,
+            "completed_count": completed_count,
+            "total_count": total_count,
+            "dataset_id": dataset_id,
+            "split": split,
+            "model_name": model_name,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "records": serialized_records,
+        }
+
+        tmp_path = cp_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(str(tmp_path), str(cp_path))
+        logger.info(f"Checkpoint saved: {completed_count}/{total_count} records -> {cp_path.name}")
+
+    def _load_checkpoint(
+        self,
+        dataset_id: str,
+        split: str,
+        model_name: str,
+        total_count: int,
+    ) -> Tuple[List[Optional[RecordResult]], Set[int]]:
+        """
+        Load a checkpoint if one exists and its total_count matches.
+
+        Returns:
+            (results_list, completed_indices) — results_list has RecordResult
+            at completed positions and None elsewhere; completed_indices is
+            the set of 0-based indices already done.
+        """
+        cp_path = self._checkpoint_path(dataset_id, split, model_name)
+        if not cp_path.exists():
+            return [None] * total_count, set()
+
+        try:
+            with open(cp_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+            if not payload.get("checkpoint"):
+                logger.warning(f"Invalid checkpoint file (missing flag): {cp_path}")
+                return [None] * total_count, set()
+
+            stored_total = payload.get("total_count", 0)
+            if stored_total != total_count:
+                logger.warning(
+                    f"Checkpoint total_count mismatch ({stored_total} vs {total_count}), ignoring checkpoint"
+                )
+                return [None] * total_count, set()
+
+            raw_records = payload.get("records", [])
+            if len(raw_records) != total_count:
+                logger.warning(
+                    f"Checkpoint records length mismatch ({len(raw_records)} vs {total_count}), ignoring"
+                )
+                return [None] * total_count, set()
+
+            results: List[Optional[RecordResult]] = []
+            completed: Set[int] = set()
+            for idx, rec in enumerate(raw_records):
+                if rec is None:
+                    results.append(None)
+                else:
+                    results.append(RecordResult(**rec))
+                    completed.add(idx)
+
+            logger.info(
+                f"Checkpoint loaded: {len(completed)}/{total_count} records from {cp_path.name}"
+            )
+            return results, completed
+
+        except Exception as e:
+            logger.warning(f"Failed to load checkpoint {cp_path}: {e}")
+            return [None] * total_count, set()
+
+    def _delete_checkpoint(self, dataset_id: str, split: str, model_name: str) -> None:
+        """Remove checkpoint file after successful save_result."""
+        cp_path = self._checkpoint_path(dataset_id, split, model_name)
+        if cp_path.exists():
+            cp_path.unlink()
+            logger.info(f"Checkpoint deleted: {cp_path.name}")
+
+    # ─── Core processing ───────────────────────────────────────────
+
+    def _process_records_concurrent(self, data: List[Dict[str, Any]], generator, evaluator, concurrency: int, model_config=None, dataset_id: str = "", split: str = "", model_name: str = "") -> List[RecordResult]:
+        """Process records with concurrent execution and checkpoint support."""
         from tqdm import tqdm
+
+        total_count = len(data)
+        use_checkpoint = bool(dataset_id and split and model_name)
+
+        # ── Load checkpoint (resume) ────────────────────────────────
+        if use_checkpoint:
+            results, completed_indices = self._load_checkpoint(
+                dataset_id, split, model_name, total_count
+            )
+            skipped = len(completed_indices)
+        else:
+            results = [None] * total_count
+            completed_indices: Set[int] = set()
+            skipped = 0
+
+        remaining_indices = [i for i in range(total_count) if i not in completed_indices]
+
+        # Shuffle remaining indices to avoid clustering of hard/timeout-prone
+        # records that may block all concurrent slots simultaneously.
+        import random
+        random.shuffle(remaining_indices)
+
+        if skipped > 0:
+            logger.info(
+                f"Resuming from checkpoint: {skipped}/{total_count} already done, "
+                f"{len(remaining_indices)} remaining"
+            )
+
+        if not remaining_indices:
+            logger.info("All records already completed in checkpoint, nothing to do")
+            return results  # type: ignore[return-value]
 
         def process_single_record(record_data: Dict[str, Any], index: int) -> RecordResult:
             """Process a single record"""
+            thread_name = threading.current_thread().name
+            start_ts = time.time()
             try:
                 # Extract required fields
                 origin_query = record_data.get('origin_query', record_data.get('question', ''))
@@ -239,6 +408,8 @@ class BenchmarkRunner:
                 
                 if not prompt:
                     raise ValueError("No prompt found in record")
+                
+                logger.info(f"[{thread_name}][rec={index}] Starting record {index}, prompt_len={len(prompt)}")
                 
                 # Generate response (with images for multimodal generators)
                 images = record_data.get('image_paths', [])
@@ -276,6 +447,8 @@ class BenchmarkRunner:
                         model_config.extract_fields
                     ))
 
+                elapsed = time.time() - start_ts
+                logger.info(f"[{thread_name}][rec={index}] Completed record {index} in {elapsed:.1f}s, score={score}")
                 return RecordResult(
                     index=index + 1,  # 1-based indexing
                     origin_query=origin_query,
@@ -291,7 +464,8 @@ class BenchmarkRunner:
                 )
                 
             except Exception as e:
-                logger.warning(f"Failed to process record {index}: {str(e)}")
+                elapsed = time.time() - start_ts
+                logger.warning(f"[{thread_name}][rec={index}] Failed record {index} in {elapsed:.1f}s: {str(e)}")
                 return RecordResult(
                     index=index + 1,
                     origin_query=record_data.get('origin_query', record_data.get('question', '')),
@@ -304,19 +478,22 @@ class BenchmarkRunner:
                     ground_truth="",
                     raw_output=f"Processing failed: {str(e)}"
                 )
-        
-        # Execute concurrently with progress tracking
-        results = [None] * len(data)
-        
+
+        # ── Checkpoint tracking state ───────────────────────────────
+        completed_this_run = 0
+        last_checkpoint_time = time.time()
+        records_since_checkpoint = 0
+
+        # ── Execute concurrently with progress tracking ─────────────
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            # Submit all tasks
+            # Only submit tasks for records NOT already in checkpoint
             future_to_index = {
-                executor.submit(process_single_record, record, idx): idx 
-                for idx, record in enumerate(data)
+                executor.submit(process_single_record, data[idx], idx): idx
+                for idx in remaining_indices
             }
             
-            # Collect results with progress bar
-            with tqdm(total=len(data), desc="Processing records", unit="record") as pbar:
+            # Collect results with progress bar (show total, start from skipped)
+            with tqdm(total=total_count, initial=skipped, desc="Processing records", unit="record") as pbar:
                 for future in as_completed(future_to_index):
                     idx = future_to_index[future]
                     try:
@@ -337,10 +514,29 @@ class BenchmarkRunner:
                             raw_output=f"Unexpected error: {str(e)}"
                         )
                     
-                    # Update progress bar
                     pbar.update(1)
-        
-        return results
+                    completed_this_run += 1
+                    records_since_checkpoint += 1
+
+                    # ── Periodic checkpoint save ────────────────────
+                    if use_checkpoint:
+                        now = time.time()
+                        should_save = (
+                            records_since_checkpoint >= CHECKPOINT_INTERVAL_RECORDS
+                            or (now - last_checkpoint_time) >= CHECKPOINT_INTERVAL_SECONDS
+                        )
+                        if should_save:
+                            self._save_checkpoint(
+                                results, dataset_id, split, model_name, total_count
+                            )
+                            last_checkpoint_time = now
+                            records_since_checkpoint = 0
+
+        # ── Final checkpoint (in case last batch didn't trigger) ────
+        if use_checkpoint and records_since_checkpoint > 0:
+            self._save_checkpoint(results, dataset_id, split, model_name, total_count)
+
+        return results  # type: ignore[return-value]
     
     def _calculate_aggregates(self, records: List[RecordResult]) -> tuple[float, int, int, float]:
         """Calculate aggregated statistics from records"""
