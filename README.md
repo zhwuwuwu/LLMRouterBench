@@ -30,7 +30,7 @@
 
 ## News
 
-- **April 2026**: This paper has been accepted to **Findings of ACL 2026**.
+- **April 2026**: 🎉🎉🎉 This paper has been accepted to **Findings of ACL 2026**!
 
 ---
 
