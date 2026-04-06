@@ -14,6 +14,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)]()
 
 <p align="center">
+  <a href="#新闻">新闻</a> ·
   <a href="#概述">概述</a> ·
   <a href="#实验结果">实验结果</a> ·
   <a href="#安装">安装</a> ·
@@ -24,6 +25,12 @@
 </p>
 
 </div>
+
+---
+
+## 新闻
+
+- **2026 年 4 月**：本文已被 **ACL 2026 Findings** 接收。
 
 ---
 
