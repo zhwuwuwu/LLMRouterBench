@@ -199,7 +199,7 @@ class BenchmarkRunner:
             )
             
             # 6. Calculate aggregated statistics
-            performance, total_prompt_tokens, total_completion_tokens, total_cost = self._calculate_aggregates(records)
+            performance, total_prompt_tokens, total_completion_tokens, total_cost, total_time = self._calculate_aggregates(records)
 
             # 7. Calculate extra metrics (aggregated from record extra_fields)
             extra_metrics = self._calculate_extra_metrics(records, plan.dataset_id)
@@ -207,7 +207,7 @@ class BenchmarkRunner:
             # 8. Create result object
             result = BenchmarkResult(
                 performance=performance,
-                time_taken=time.time() - start_time,
+                time_taken=total_time,
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 cost=total_cost,
@@ -337,15 +337,30 @@ class BenchmarkRunner:
 
             results: List[Optional[RecordResult]] = []
             completed: Set[int] = set()
+            retryable_count = 0
             for idx, rec in enumerate(raw_records):
                 if rec is None:
                     results.append(None)
                 else:
-                    results.append(RecordResult(**rec))
-                    completed.add(idx)
+                    # Treat failed records as incomplete so they get retried
+                    raw_output = rec.get("raw_output", "")
+                    is_failed = (
+                        rec.get("score") is None
+                        or (isinstance(raw_output, str) and (
+                            raw_output.startswith("Generation failed")
+                            or raw_output.startswith("Processing failed")
+                        ))
+                    )
+                    if is_failed:
+                        results.append(None)
+                        retryable_count += 1
+                    else:
+                        results.append(RecordResult(**rec))
+                        completed.add(idx)
 
             logger.info(
                 f"Checkpoint loaded: {len(completed)}/{total_count} records from {cp_path.name}"
+                f" ({retryable_count} failed records will be retried)"
             )
             return results, completed
 
@@ -460,6 +475,7 @@ class BenchmarkRunner:
                     prediction=prediction,
                     ground_truth=ground_truth,
                     raw_output=raw_output,
+                    processing_time=elapsed,
                     extra_fields=extra_fields
                 )
                 
@@ -476,7 +492,8 @@ class BenchmarkRunner:
                     score=None,
                     prediction="",
                     ground_truth="",
-                    raw_output=f"Processing failed: {str(e)}"
+                    raw_output=f"Processing failed: {str(e)}",
+                    processing_time=elapsed
                 )
 
         # ── Checkpoint tracking state ───────────────────────────────
@@ -511,7 +528,8 @@ class BenchmarkRunner:
                             score=None,
                             prediction="",
                             ground_truth="",
-                            raw_output=f"Unexpected error: {str(e)}"
+                            raw_output=f"Unexpected error: {str(e)}",
+                            processing_time=0.0
                         )
                     
                     pbar.update(1)
@@ -538,17 +556,18 @@ class BenchmarkRunner:
 
         return results  # type: ignore[return-value]
     
-    def _calculate_aggregates(self, records: List[RecordResult]) -> tuple[float, int, int, float]:
+    def _calculate_aggregates(self, records: List[RecordResult]) -> tuple[float, int, int, float, float]:
         """Calculate aggregated statistics from records"""
         total_prompt_tokens = sum(r.prompt_tokens for r in records)
         total_completion_tokens = sum(r.completion_tokens for r in records)
         total_cost = sum(r.cost for r in records)
+        total_time = sum(r.processing_time for r in records)
         
         # Calculate performance (average of non-null scores)
         valid_scores = [r.score for r in records if r.score is not None]
         performance = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         
-        return performance, total_prompt_tokens, total_completion_tokens, total_cost
+        return performance, total_prompt_tokens, total_completion_tokens, total_cost, total_time
     
     def _get_model_config(self, model_name: str):
         """Get model configuration by name"""

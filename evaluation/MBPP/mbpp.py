@@ -62,7 +62,7 @@ class MBPPEvaluator(BaseEvaluator):
     def evaluate(self, data, output_text, **kwargs):
         prediction = self.extract_raw_answer(raw_data=output_text, test_list=data['test_list'])
         
-        is_correct = check_correctness(task_id=data['task_id'], completion_id=0, solution=prediction, time_out=10)['passed']
+        is_correct = check_correctness(task_id=data['task_id'], completion_id=0, solution=prediction, time_out=3)['passed']
         
         return {
             "prediction": prediction,

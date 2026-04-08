@@ -84,12 +84,12 @@ class DirectGenerator:
             thread_name = threading.current_thread().name
             logger.warning(
                 f"[{thread_name}] Retrying DirectGenerator.generate due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/10"
+                f"Attempt {retry_state.attempt_number}/5"
             )
     
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=2, max=100),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
         before_sleep=lambda retry_state: DirectGenerator._log_retry(None, retry_state)
     )
@@ -149,10 +149,6 @@ class DirectGenerator:
                 cause_str += f" <- {type(cause).__name__}: {cause}"
                 cause = cause.__cause__
             logger.error(f"[{thread_name}] Error in DirectGenerator._generate: {error_str}{cause_str}, model: {self.model_name}")
-            # Reinitialize client on connection errors to get a fresh connection pool
-            if "connection error" in error_str.lower() or "connect error" in error_str.lower():
-                logger.warning(f"[{thread_name}] Reinitializing client due to connection error for model {self.model_name}")
-                self._initialize_client()
             # Check for sensitive_words_detected error - don't retry
             if "sensitive_words_detected" in error_str.lower():
                 raise NonRetryableError(f"[SENSITIVE_WORDS_DETECTED] {error_str}")
@@ -366,12 +362,12 @@ class MultimodalGenerator(DirectGenerator):
         if exception:
             logger.warning(
                 f"Retrying MultimodalGenerator.generate due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/10"
+                f"Attempt {retry_state.attempt_number}/5"
             )
     
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=2, max=100),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
         before_sleep=lambda retry_state: MultimodalGenerator._log_retry(None, retry_state)
     )
@@ -504,12 +500,12 @@ class EmbeddingGenerator(DirectGenerator):
         if exception:
             logger.warning(
                 f"Retrying EmbeddingGenerator.generate_embedding due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/10"
+                f"Attempt {retry_state.attempt_number}/5"
             )
 
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=2, max=100),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
         before_sleep=lambda retry_state: EmbeddingGenerator._log_retry(None, retry_state)
     )

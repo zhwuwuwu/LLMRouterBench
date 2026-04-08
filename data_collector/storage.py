@@ -20,6 +20,7 @@ class RecordResult:
     prediction: str
     ground_truth: str
     raw_output: Any
+    processing_time: float = 0.0
     extra_fields: Dict[str, Any] = field(default_factory=dict)  # Extracted fields from response
 
 
@@ -97,6 +98,7 @@ class ResultsStorage:
                     "prediction": record.prediction,
                     "ground_truth": record.ground_truth,
                     "raw_output": record.raw_output,
+                    "processing_time": record.processing_time,
                     "extra_fields": record.extra_fields
                 }
                 for record in result.records

@@ -39,6 +39,9 @@ def check_correctness(sample, generation, timeout, debug=True):
         result = [[-1 for i in range(len(in_outs["inputs"]))]]
         if debug:
             print(f"global timeout")
+
+    if not metadata_list:
+        metadata_list = [{"error_code": -1, "error_message": "Global Timeout"}]
             
     return result[0], metadata_list[0]
 

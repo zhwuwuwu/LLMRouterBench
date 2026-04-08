@@ -23,7 +23,7 @@ def read_json_or_jsonl(data_path, split='', mapping_key=None):
     else:
         raise FileNotFoundError("No JSON or JSONL file found.")
     
-    with open(file_path, 'r') as file:
+    with open(file_path, 'r', encoding='utf-8') as file:
         if file_path.endswith('.json'):
             data = json.load(file)
         elif file_path.endswith('.jsonl'):
@@ -42,7 +42,7 @@ class KORBenchEvaluator(BaseEvaluator):
         self.split = split
     
     def load_yaml(self, file_path: str) -> dict:
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     
     def load_data(self, split: str = "test"):

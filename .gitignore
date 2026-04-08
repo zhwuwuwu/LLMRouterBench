@@ -280,3 +280,11 @@ results/inference
 
 # SGI-Bench runner script (contains local config, use run_sgibench.sh.example as template)
 run_sgibench.sh
+
+
+venv_router/
+.sisyphus/
+nul
+.env
+*.yaml
+results

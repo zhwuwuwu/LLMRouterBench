@@ -2,6 +2,7 @@ import io
 import os
 
 import signal
+import threading
 import tempfile
 import platform
 import contextlib
@@ -98,14 +99,26 @@ def check_correctness(task_id: int,
 
 @contextlib.contextmanager
 def time_limit(seconds: float):
-    def signal_handler(signum, frame):
-        raise TimeoutException("Timed out!")
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    signal.signal(signal.SIGALRM, signal_handler)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+    if platform.system() != 'Windows':
+        # Unix: 使用原有的 signal 方式
+        def signal_handler(signum, frame):
+            raise TimeoutException("Timed out!")
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        signal.signal(signal.SIGALRM, signal_handler)
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    else:
+        # Windows: threading.Timer 作为超时机制
+        # 注意: Timer 无法直接中断执行线程，
+        # 但 check_correctness() 的 p.join(timeout) + p.kill() 提供进程级超时保障
+        timer = threading.Timer(seconds, lambda: None)
+        timer.start()
+        try:
+            yield
+        finally:
+            timer.cancel()
 
 
 @contextlib.contextmanager
