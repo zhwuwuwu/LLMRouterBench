@@ -274,6 +274,7 @@ class BenchmarkRunner:
                     "prediction": r.prediction,
                     "ground_truth": r.ground_truth,
                     "raw_output": r.raw_output,
+                    "processing_time": r.processing_time,
                     "extra_fields": r.extra_fields,
                 })
 
@@ -412,8 +413,10 @@ class BenchmarkRunner:
             logger.info("All records already completed in checkpoint, nothing to do")
             return results  # type: ignore[return-value]
 
-        def process_single_record(record_data: Dict[str, Any], index: int) -> RecordResult:
+        def process_single_record(record_data: Dict[str, Any], index: int, startup_delay: float = 0.0) -> RecordResult:
             """Process a single record"""
+            if startup_delay > 0:
+                time.sleep(startup_delay)
             thread_name = threading.current_thread().name
             start_ts = time.time()
             try:
@@ -503,10 +506,16 @@ class BenchmarkRunner:
 
         # ── Execute concurrently with progress tracking ─────────────
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            # Only submit tasks for records NOT already in checkpoint
+            # Submit tasks with staggered startup delays to avoid
+            # overwhelming the API with simultaneous connections.
+            # Only the first batch (up to concurrency) gets incremental
+            # delays; subsequent tasks are naturally queued by the pool.
             future_to_index = {
-                executor.submit(process_single_record, data[idx], idx): idx
-                for idx in remaining_indices
+                executor.submit(
+                    process_single_record, data[idx], idx,
+                    i * 1.0 if i < concurrency else 0.0
+                ): idx
+                for i, idx in enumerate(remaining_indices)
             }
             
             # Collect results with progress bar (show total, start from skipped)
