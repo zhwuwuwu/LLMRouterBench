@@ -14,6 +14,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)]()
 
 <p align="center">
+  <a href="#news">News</a> ·
   <a href="#overview">Overview</a> ·
   <a href="#results">Results</a> ·
   <a href="#installation">Installation</a> ·
@@ -24,6 +25,12 @@
 </p>
 
 </div>
+
+---
+
+## News
+
+- **April 2026**: 🎉🎉🎉 This paper has been accepted to **Findings of ACL 2026**!
 
 ---
 
