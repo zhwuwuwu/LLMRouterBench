@@ -287,4 +287,14 @@ venv_router/
 nul
 .env
 *.yaml
-results
+# 忽略 results 下所有直接子项
+results/*
+# 但保留 results/ 下的 .py 文件
+!results/*.py
+# 允许 Git 进入子目录
+!results/*/
+# 忽略子目录里的所有内容
+results/*/*
+# 但保留子目录里的 .py 文件
+!results/*/*.py
+!results/*/*.sh
