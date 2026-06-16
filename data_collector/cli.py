@@ -76,7 +76,7 @@ def cmd_run(args):
         return 1
 
     # Generate run plan
-    plans = planner.generate_run_plan()
+    plans = planner.generate_run_plan(retry_failed=getattr(args, 'retry_failed', False))
     planner.print_plan_summary(plans)
     
     if not plans:
@@ -91,7 +91,8 @@ def cmd_run(args):
             return 0
     
     # Execute runs — pass the stop event so runner can react to Ctrl+C
-    runner = BenchmarkRunner(config, storage, stop_event=_stop_event)
+    runner = BenchmarkRunner(config, storage, stop_event=_stop_event,
+                             retry_failed=getattr(args, 'retry_failed', False))
     results = runner.run_all(plans)
     
     # Print summary
@@ -227,6 +228,7 @@ def main():
     run_parser.add_argument('config', help='Path to configuration YAML file')
     run_parser.add_argument('-y', '--yes', action='store_true', help='Skip confirmation prompt (non-interactive mode)')
     run_parser.add_argument('--overwrite', action='store_true', help='Force overwrite existing results (override config setting)')
+    run_parser.add_argument('--retry-failed', action='store_true', help='Re-run only failed/errored records in existing results, merging successes back')
     run_parser.add_argument('--log-level', help='Override log level (DEBUG, INFO, WARNING, ERROR)')
     run_parser.set_defaults(func=cmd_run)
     

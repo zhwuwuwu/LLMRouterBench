@@ -66,7 +66,115 @@ class ResultsStorage:
         # Check if any result file exists in the directory (must have timestamp format, not checkpoint files)
         file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
         return any(result_dir.glob(file_pattern))
-    
+
+    # ── retry-failed helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _is_failed_record(record: Dict[str, Any]) -> bool:
+        """Return True if a stored record represents a failed generation."""
+        raw = record.get("raw_output", "") or ""
+        return (
+            record.get("score") is None
+            or record.get("completion_tokens", 0) == 0
+            or (isinstance(raw, str) and (
+                raw.startswith("Generation failed")
+                or raw.startswith("Processing failed")
+                or raw.startswith("Cancelled by user")
+            ))
+        )
+
+    def count_failed_records(self, dataset_id: str, split: str, model_name: str) -> int:
+        """Return the number of failed records in the latest result file, or -1 if no result."""
+        result_dir = self.bench_dir / dataset_id / split / model_name
+        if not result_dir.exists():
+            return -1
+        file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
+        result_files = list(result_dir.glob(file_pattern))
+        legacy = result_dir / "result.json"
+        if legacy.exists():
+            result_files.append(legacy)
+        latest = self._get_latest_non_demo_file(result_files)
+        if not latest:
+            return -1
+        try:
+            with open(latest, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return sum(1 for r in data.get("records", []) if self._is_failed_record(r))
+        except Exception as e:
+            logger.warning(f"Failed to count failed records in {latest}: {e}")
+            return -1
+
+    def load_result_for_retry(self, dataset_id: str, split: str, model_name: str):
+        """
+        Load the latest result file and return:
+          (path, full_result_dict)
+        where full_result_dict includes the original records list.
+        Returns (None, None) if no result exists.
+        """
+        result_dir = self.bench_dir / dataset_id / split / model_name
+        if not result_dir.exists():
+            return None, None
+        file_pattern = f"{dataset_id}-{split}-{model_name}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].json"
+        result_files = list(result_dir.glob(file_pattern))
+        legacy = result_dir / "result.json"
+        if legacy.exists():
+            result_files.append(legacy)
+        latest = self._get_latest_non_demo_file(result_files)
+        if not latest:
+            return None, None
+        try:
+            with open(latest, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return latest, data
+        except Exception as e:
+            logger.warning(f"Failed to load result for retry from {latest}: {e}")
+            return None, None
+
+    def save_result_inplace(self, result, dataset_id: str, split: str,
+                            model_name: str, existing_path: Path,
+                            data_fingerprint: str = ""):
+        """
+        Overwrite an existing result file in-place (used by retry-failed so the
+        old file with Generation-failed records is replaced, not left alongside
+        a new timestamped file).
+        """
+        result_dict = {
+            "performance": result.performance,
+            "time_taken": result.time_taken,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "cost": result.cost,
+            "counts": result.counts,
+            "model_name": result.model_name,
+            "dataset_name": result.dataset_name,
+            "split": result.split,
+            "demo": result.demo,
+            "extra_metrics": result.extra_metrics,
+            "data_fingerprint": data_fingerprint,
+            "records": [
+                {
+                    "index": r.index,
+                    "origin_query": r.origin_query,
+                    "prompt": r.prompt,
+                    "prompt_tokens": r.prompt_tokens,
+                    "completion_tokens": r.completion_tokens,
+                    "cost": r.cost,
+                    "score": r.score,
+                    "prediction": r.prediction,
+                    "ground_truth": r.ground_truth,
+                    "raw_output": r.raw_output,
+                    "processing_time": r.processing_time,
+                    "extra_fields": r.extra_fields,
+                }
+                for r in result.records
+            ],
+        }
+        tmp_path = existing_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, indent=2, ensure_ascii=False)
+        os.replace(str(tmp_path), str(existing_path))
+        logger.info(f"Saved retry-failed result (in-place): {existing_path}")
+
     def save_result(self, result: BenchmarkResult, dataset_id: str, split: str, model_name: str, data_fingerprint: str = ""):
         """Save a benchmark result to storage"""
         result_path = self.get_result_path(dataset_id, split, model_name)

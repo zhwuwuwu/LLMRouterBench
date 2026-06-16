@@ -87,12 +87,15 @@ class BenchmarkRunner:
     """Execute benchmark runs with concurrent processing"""
 
     def __init__(self, config: BenchmarkConfig, storage: ResultsStorage,
-                 stop_event: Optional[threading.Event] = None):
+                 stop_event: Optional[threading.Event] = None,
+                 retry_failed: bool = False):
         self.config = config
         self.storage = storage
         self.evaluator_factory = EvaluatorFactory(grader_cache_config=config.grader_cache_config)
         # stop_event is set by CLI when user presses Ctrl+C (first press = graceful)
         self.stop_event = stop_event or threading.Event()
+        # retry_failed: when True, only re-run failed records from existing result files
+        self.retry_failed = retry_failed
     
     def run_all(self, plans: List[RunPlan]) -> Dict[str, Any]:
         """Execute all planned runs"""
@@ -115,8 +118,7 @@ class BenchmarkRunner:
         }
         
         for plan in plans:
-            logger.info(f"Processing run: {plan.run_key}")
-            
+            logger.info(f"Processing run: {plan.run_key}")            
             try:
                 run_result = self.execute_single_run(plan)
                 if run_result:
@@ -190,16 +192,30 @@ class BenchmarkRunner:
             logger.info(f"Created generator: {type(generator).__name__} for model {plan.model_name}")
             
             # 5. Process records concurrently
-            records = self._process_records_concurrent(
-                data=data,
-                generator=generator,
-                evaluator=evaluator,
-                concurrency=self.config.run.concurrency,
-                model_config=model_config,
-                dataset_id=plan.dataset_id,
-                split=plan.split,
-                model_name=plan.model_name
-            )
+            #    In retry-failed mode: load existing result, re-run only failed
+            #    records, then merge back and overwrite.
+            if self.retry_failed:
+                records = self._process_records_retry_failed(
+                    data=data,
+                    generator=generator,
+                    evaluator=evaluator,
+                    concurrency=self.config.run.concurrency,
+                    model_config=model_config,
+                    dataset_id=plan.dataset_id,
+                    split=plan.split,
+                    model_name=plan.model_name,
+                )
+            else:
+                records = self._process_records_concurrent(
+                    data=data,
+                    generator=generator,
+                    evaluator=evaluator,
+                    concurrency=self.config.run.concurrency,
+                    model_config=model_config,
+                    dataset_id=plan.dataset_id,
+                    split=plan.split,
+                    model_name=plan.model_name
+                )
             
             # 6. Calculate aggregated statistics
             performance, total_prompt_tokens, total_completion_tokens, total_cost, total_time = self._calculate_aggregates(records)
@@ -224,7 +240,23 @@ class BenchmarkRunner:
             )
 
             # 9. Save result
-            self.storage.save_result(result, plan.dataset_id, plan.split, plan.model_name, data_fingerprint)
+            #    retry-failed mode: overwrite the existing file in-place so the old
+            #    "Generation failed" records are replaced and no duplicate files accumulate.
+            #    Normal mode: write a fresh timestamped file.
+            if self.retry_failed:
+                existing_path, _ = self.storage.load_result_for_retry(
+                    plan.dataset_id, plan.split, plan.model_name
+                )
+                if existing_path:
+                    self.storage.save_result_inplace(
+                        result, plan.dataset_id, plan.split, plan.model_name,
+                        existing_path, data_fingerprint
+                    )
+                else:
+                    # Fallback: no existing file found (shouldn't normally happen)
+                    self.storage.save_result(result, plan.dataset_id, plan.split, plan.model_name, data_fingerprint)
+            else:
+                self.storage.save_result(result, plan.dataset_id, plan.split, plan.model_name, data_fingerprint)
 
             # 10. Clean up checkpoint file (no longer needed after successful save)
             self._delete_checkpoint(plan.dataset_id, plan.split, plan.model_name)
@@ -721,4 +753,214 @@ class BenchmarkRunner:
             if extra_metrics:
                 metrics_str = ", ".join(f"{k}={v:.3f}" for k, v in extra_metrics.items())
                 logger.info(f"  Extra metrics: {metrics_str}")
+
+    # ─── retry-failed processing ──────────────────────────────────────
+
+    def _process_records_retry_failed(
+        self,
+        data: List[Dict[str, Any]],
+        generator,
+        evaluator,
+        concurrency: int,
+        model_config=None,
+        dataset_id: str = "",
+        split: str = "",
+        model_name: str = "",
+    ) -> List[RecordResult]:
+        """
+        Load an existing completed result file, identify failed records,
+        re-run only those, then merge the new results back into the full
+        record list — preserving all original successful records verbatim.
+
+        Token/time/cost from retried records replace the zeros that were
+        stored for the failed originals.
+        """
+        # ── Load existing result ────────────────────────────────────
+        result_path, result_data = self.storage.load_result_for_retry(
+            dataset_id, split, model_name
+        )
+        if result_data is None:
+            logger.warning(
+                f"retry-failed: no existing result for {dataset_id}/{split}/{model_name}, "
+                "falling back to full run"
+            )
+            return self._process_records_concurrent(
+                data=data,
+                generator=generator,
+                evaluator=evaluator,
+                concurrency=concurrency,
+                model_config=model_config,
+                dataset_id=dataset_id,
+                split=split,
+                model_name=model_name,
+            )
+
+        stored_records: List[Dict] = result_data.get("records", [])
+        total_count = len(stored_records)
+
+        # ── Identify failed indices (0-based) ──────────────────────
+        failed_indices = [
+            i for i, r in enumerate(stored_records)
+            if ResultsStorage._is_failed_record(r)
+        ]
+        logger.info(
+            f"retry-failed: {len(failed_indices)}/{total_count} records need retry "
+            f"in {dataset_id}/{split}/{model_name}"
+        )
+
+        if not failed_indices:
+            # Nothing to retry — reconstruct RecordResult list from stored data
+            return [RecordResult(**r) for r in stored_records]
+
+        # ── Rebuild results list: successes as RecordResult, failures as None ──
+        results: List[Optional[RecordResult]] = []
+        for i, r in enumerate(stored_records):
+            if i in set(failed_indices):
+                results.append(None)
+            else:
+                results.append(RecordResult(**r))
+
+        # ── Re-run only the failed indices ─────────────────────────
+        # We reuse _process_records_concurrent by building a synthetic
+        # data slice with only the failed records, using their original
+        # 0-based indices so results land in the right slots.
+
+        # Map: original_index → data row
+        failed_data_subset = {idx: data[idx] for idx in failed_indices if idx < len(data)}
+
+        if not failed_data_subset:
+            logger.warning("retry-failed: failed indices exceed data length, nothing to retry")
+            return [RecordResult(**r) for r in stored_records]
+
+        # Temporarily build a list of (original_idx, record_data) pairs so we
+        # can run them concurrently and map results back.
+        from tqdm import tqdm
+
+        def process_single_retry(record_data: Dict[str, Any], orig_idx: int) -> RecordResult:
+            """Run one failed record through generator + evaluator."""
+            if self.stop_event.is_set():
+                return RecordResult(
+                    index=orig_idx + 1,
+                    origin_query=record_data.get("origin_query", record_data.get("question", "")),
+                    prompt=record_data.get("prompt", record_data.get("formatted_prompt", "")),
+                    prompt_tokens=0, completion_tokens=0, cost=0.0,
+                    score=None, prediction="", ground_truth="",
+                    raw_output="Processing failed: cancelled by user",
+                    processing_time=0.0,
+                )
+            thread_name = threading.current_thread().name
+            start_ts = time.time()
+            try:
+                origin_query = record_data.get("origin_query", record_data.get("question", ""))
+                prompt = record_data.get("prompt", record_data.get("formatted_prompt", ""))
+                if not prompt:
+                    raise ValueError("No prompt found in record")
+                logger.info(
+                    f"[{thread_name}][retry][rec={orig_idx}] Starting, prompt_len={len(prompt)}"
+                )
+                images = record_data.get("image_paths", [])
+                gen_output = generator.generate(prompt, images=images) if images else generator.generate(prompt)
+
+                raw_output = gen_output.output
+                eval_result = evaluator.evaluate(record_data, raw_output)
+
+                is_correct = eval_result.get("is_correct", False)
+                if is_correct is None:
+                    score = None
+                elif isinstance(is_correct, bool):
+                    score = 1.0 if is_correct else 0.0
+                else:
+                    score = float(is_correct)
+
+                extra_fields = {
+                    k: v for k, v in eval_result.items()
+                    if k not in ("is_correct", "prediction", "ground_truth")
+                }
+                if model_config and model_config.extract_fields and gen_output.raw_response:
+                    from .runner import extract_extra_fields
+                    extra_fields.update(extract_extra_fields(gen_output.raw_response, model_config.extract_fields))
+
+                elapsed = time.time() - start_ts
+                logger.info(
+                    f"[{thread_name}][retry][rec={orig_idx}] Done in {elapsed:.1f}s, score={score}"
+                )
+                return RecordResult(
+                    index=orig_idx + 1,
+                    origin_query=origin_query,
+                    prompt=prompt,
+                    prompt_tokens=gen_output.prompt_tokens,
+                    completion_tokens=gen_output.completion_tokens,
+                    cost=gen_output.cost,
+                    score=score,
+                    prediction=eval_result.get("prediction", ""),
+                    ground_truth=eval_result.get("ground_truth", ""),
+                    raw_output=raw_output,
+                    processing_time=elapsed,
+                    extra_fields=extra_fields,
+                )
+            except Exception as e:
+                elapsed = time.time() - start_ts
+                logger.warning(f"[{thread_name}][retry][rec={orig_idx}] Failed in {elapsed:.1f}s: {e}")
+                return RecordResult(
+                    index=orig_idx + 1,
+                    origin_query=record_data.get("origin_query", record_data.get("question", "")),
+                    prompt=record_data.get("prompt", record_data.get("formatted_prompt", "")),
+                    prompt_tokens=0, completion_tokens=0, cost=0.0,
+                    score=None, prediction="", ground_truth="",
+                    raw_output=f"Processing failed: {str(e)}",
+                    processing_time=elapsed,
+                )
+
+        # Run retries concurrently
+        ordered_failed = sorted(failed_data_subset.keys())  # deterministic order
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_orig = {
+                executor.submit(process_single_retry, failed_data_subset[idx], idx): idx
+                for idx in ordered_failed
+            }
+            with tqdm(
+                total=len(ordered_failed),
+                desc=f"Retrying failed records ({dataset_id}/{split}/{model_name})",
+                unit="record",
+            ) as pbar:
+                for future in as_completed(future_to_orig):
+                    orig_idx = future_to_orig[future]
+                    if self.stop_event.is_set():
+                        for f in future_to_orig:
+                            f.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    try:
+                        results[orig_idx] = future.result()
+                    except Exception as e:
+                        logger.error(f"retry-failed: unexpected error for record {orig_idx}: {e}")
+                        results[orig_idx] = RecordResult(
+                            index=orig_idx + 1,
+                            origin_query="", prompt="",
+                            prompt_tokens=0, completion_tokens=0, cost=0.0,
+                            score=None, prediction="", ground_truth="",
+                            raw_output=f"Unexpected error: {str(e)}",
+                            processing_time=0.0,
+                        )
+                    pbar.update(1)
+
+        # Fill any remaining None slots (e.g. if we hit stop_event) with the
+        # original stored failed record so the JSON stays complete.
+        for i in failed_indices:
+            if results[i] is None:
+                results[i] = RecordResult(**stored_records[i])
+
+        # ── Summary ────────────────────────────────────────────────
+        retried_success = sum(
+            1 for i in failed_indices
+            if results[i] is not None
+            and results[i].score is not None  # type: ignore[union-attr]
+            and results[i].score > 0          # type: ignore[union-attr]
+        )
+        logger.info(
+            f"retry-failed complete: {retried_success}/{len(failed_indices)} previously-failed "
+            f"records now pass"
+        )
+
+        return results  # type: ignore[return-value]
 

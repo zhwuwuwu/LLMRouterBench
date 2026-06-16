@@ -20,8 +20,13 @@ class RunPlanner:
         self.config = config
         self.storage = storage
     
-    def generate_run_plan(self) -> List[RunPlan]:
-        """Generate complete run plan with deduplication"""
+    def generate_run_plan(self, retry_failed: bool = False) -> List[RunPlan]:
+        """Generate complete run plan with deduplication.
+
+        Args:
+            retry_failed: When True, include runs that have a completed result
+                          file but contain failed/errored records.
+        """
         plans = []
         
         for dataset_config in self.config.datasets:
@@ -60,22 +65,43 @@ class RunPlanner:
                 for model_config in self.config.models:
                     run_key = f"{dataset_config.dataset_id}/{split}/{model_config.name}"
 
-                    # Check if run is needed (deduplication + fingerprint check)
-                    if self.storage.needs_run(
-                        dataset_config.dataset_id,
-                        split,
-                        model_config.name,
-                        current_fingerprint=current_fingerprint,
-                        overwrite=self.config.run.overwrite
-                    ):
-                        plans.append(RunPlan(
-                            dataset_id=dataset_config.dataset_id,
-                            split=split,
-                            model_name=model_config.name,
-                            run_key=run_key
-                        ))
+                    if retry_failed:
+                        # In retry-failed mode: only include runs that have a completed
+                        # result file with at least one failed record.
+                        failed_count = self.storage.count_failed_records(
+                            dataset_config.dataset_id, split, model_config.name
+                        )
+                        if failed_count > 0:
+                            logger.info(
+                                f"Retry-failed: {run_key} has {failed_count} failed record(s) — scheduling retry"
+                            )
+                            plans.append(RunPlan(
+                                dataset_id=dataset_config.dataset_id,
+                                split=split,
+                                model_name=model_config.name,
+                                run_key=run_key
+                            ))
+                        elif failed_count == 0:
+                            logger.info(f"Retry-failed: {run_key} — no failures found, skipping")
+                        else:
+                            logger.info(f"Retry-failed: {run_key} — no result file found, skipping")
                     else:
-                        logger.info(f"Skipping existing result: {run_key}")
+                        # Normal mode: skip if result already exists
+                        if self.storage.needs_run(
+                            dataset_config.dataset_id,
+                            split,
+                            model_config.name,
+                            current_fingerprint=current_fingerprint,
+                            overwrite=self.config.run.overwrite
+                        ):
+                            plans.append(RunPlan(
+                                dataset_id=dataset_config.dataset_id,
+                                split=split,
+                                model_name=model_config.name,
+                                run_key=run_key
+                            ))
+                        else:
+                            logger.info(f"Skipping existing result: {run_key}")
         
         logger.info(f"Generated {len(plans)} run plans")
         return plans
