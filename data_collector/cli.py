@@ -64,6 +64,13 @@ def cmd_run(args):
         logger.info("Command-line --overwrite flag enabled, overriding config setting")
         config.run.overwrite = True
 
+    # --retry-failed is incompatible with demo_mode: demo slicing would corrupt the
+    # original full-dataset result file via in-place overwrite.
+    if getattr(args, 'retry_failed', False) and config.run.demo_mode:
+        logger.error("--retry-failed cannot be used together with demo_mode. "
+                     "Disable demo_mode in the config first.")
+        return 1
+
     # Initialize storage
     storage = ResultsStorage(config.run.output_dir)
     

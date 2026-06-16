@@ -48,7 +48,7 @@ def _check_stop_and_log(retry_state, generator_label: str = "Generator") -> None
     if exception:
         logger.warning(
             f"[{thread_name}] Retrying {generator_label} due to: {str(exception)}. "
-            f"Attempt {retry_state.attempt_number}/5"
+            f"Attempt {retry_state.attempt_number}/3"
         )
 
 
@@ -116,7 +116,7 @@ class DirectGenerator:
         _check_stop_and_log(retry_state, f"DirectGenerator({self.model_name})")
     
     @retry(
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
         before_sleep=lambda retry_state: _check_stop_and_log(retry_state, "DirectGenerator")
@@ -390,14 +390,14 @@ class MultimodalGenerator(DirectGenerator):
         if exception:
             logger.warning(
                 f"Retrying MultimodalGenerator.generate due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/5"
+                f"Attempt {retry_state.attempt_number}/3"
             )
     
     @retry(
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
-        before_sleep=lambda retry_state: MultimodalGenerator._log_retry(None, retry_state)
+        before_sleep=lambda retry_state: _check_stop_and_log(retry_state, "MultimodalGenerator")
     )
     def _generate_multimodal(self, question: str, images: Optional[List[str]] = None) -> GeneratorOutput:
         """Generate response with multimodal input support"""
@@ -528,14 +528,14 @@ class EmbeddingGenerator(DirectGenerator):
         if exception:
             logger.warning(
                 f"Retrying EmbeddingGenerator.generate_embedding due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/5"
+                f"Attempt {retry_state.attempt_number}/3"
             )
 
     @retry(
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
-        before_sleep=lambda retry_state: EmbeddingGenerator._log_retry(None, retry_state)
+        before_sleep=lambda retry_state: _check_stop_and_log(retry_state, "EmbeddingGenerator")
     )
     def _generate_embedding(self, text: str) -> EmbeddingOutput:
         """Generate embedding for a single text"""

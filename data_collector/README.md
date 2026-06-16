@@ -2,6 +2,11 @@
 
 The **Collector** module provides unified API access to LLMs with caching, retries, and cost tracking for benchmark data collection.
 
+> **Python version note:** the collector's graceful Ctrl+C shutdown path uses
+> `ThreadPoolExecutor.shutdown(cancel_futures=True)`, so benchmark collection
+> requires **Python 3.9+**. Python 3.8 may fail during interrupted multi-threaded
+> runs.
+
 ---
 
 ## 🚀 Quick Start
@@ -104,7 +109,7 @@ run:
 ### Force Overwrite
 
 ```bash
-python -m data_collector.cli run config.yaml --force
+python -m data_collector.cli run config.yaml --overwrite
 ```
 
 ### Multimodal Support

@@ -132,6 +132,10 @@ Top methods achieve up to 4% PerfGain and 31.7% CostSave. However, some routers 
 
 ## Installation
 
+> **Note:** data collection with graceful multi-thread Ctrl+C shutdown requires
+> **Python 3.9+** because it relies on `ThreadPoolExecutor.shutdown(cancel_futures=True)`.
+> Python 3.8 is not recommended for running `data_collector` jobs.
+
 ```bash
 git clone https://github.com/ynulihao/LLMRouterBench.git
 cd LLMRouterBench

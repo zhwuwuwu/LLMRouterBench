@@ -71,17 +71,28 @@ class ResultsStorage:
 
     @staticmethod
     def _is_failed_record(record: Dict[str, Any]) -> bool:
-        """Return True if a stored record represents a failed generation."""
+        """Return True only for explicit generation/processing failures.
+
+        A ``score`` of ``None`` can be a valid outcome for datasets that are
+        judged later or scored externally, so it is not enough by itself to
+        trigger retry-failed mode.
+        """
         raw = record.get("raw_output", "") or ""
-        return (
-            record.get("score") is None
-            or record.get("completion_tokens", 0) == 0
-            or (isinstance(raw, str) and (
-                raw.startswith("Generation failed")
-                or raw.startswith("Processing failed")
-                or raw.startswith("Cancelled by user")
-            ))
+        if not isinstance(raw, str):
+            raw = str(raw)
+
+        raw_stripped = raw.strip()
+        raw_lower = raw_stripped.lower()
+        explicit_failure = (
+            raw_stripped.startswith("Generation failed")
+            or raw_stripped.startswith("Processing failed")
+            or raw_stripped.startswith("Cancelled by user")
+            or "generation failed" in raw_lower
+            or "processing failed" in raw_lower
+            or "cancelled by user" in raw_lower
         )
+        empty_generation = record.get("completion_tokens", 0) == 0 and not raw_stripped
+        return explicit_failure or empty_generation
 
     def count_failed_records(self, dataset_id: str, split: str, model_name: str) -> int:
         """Return the number of failed records in the latest result file, or -1 if no result."""
