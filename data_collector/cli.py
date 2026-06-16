@@ -1,5 +1,7 @@
 import argparse
+import signal
 import sys
+import threading
 from pathlib import Path
 from loguru import logger
 
@@ -7,6 +9,10 @@ from .config_loader import ConfigLoader
 from .planner import RunPlanner
 from .runner import BenchmarkRunner
 from .storage import ResultsStorage
+import generators as _generators_mod
+
+# Global stop event shared with runner/generator so all layers can check it
+_stop_event = threading.Event()
 
 
 def setup_logging(level: str):
@@ -31,6 +37,27 @@ def cmd_run(args):
     
     # Setup logging
     setup_logging(args.log_level or config.run.log_level)
+
+    # ── Graceful shutdown handler ───────────────────────────────────
+    _interrupt_count = [0]
+
+    def _handle_interrupt(signum, frame):
+        _interrupt_count[0] += 1
+        if _interrupt_count[0] == 1:
+            logger.warning(
+                "\n[Ctrl+C] Graceful stop requested — waiting for in-flight records to finish "
+                "and saving checkpoint. Press Ctrl+C again to force-quit immediately."
+            )
+            _stop_event.set()
+            _generators_mod.stop_event.set()  # also stop retries inside generators
+        else:
+            logger.warning("\n[Ctrl+C x2] Force-quit. Exiting immediately.")
+            sys.exit(130)
+
+    signal.signal(signal.SIGINT, _handle_interrupt)
+    if hasattr(signal, "SIGBREAK"):   # Windows Ctrl+Break
+        signal.signal(signal.SIGBREAK, _handle_interrupt)
+    # ───────────────────────────────────────────────────────────────
 
     # Override config with command-line arguments
     if args.overwrite:
@@ -63,8 +90,8 @@ def cmd_run(args):
             logger.info("Execution cancelled")
             return 0
     
-    # Execute runs
-    runner = BenchmarkRunner(config, storage)
+    # Execute runs — pass the stop event so runner can react to Ctrl+C
+    runner = BenchmarkRunner(config, storage, stop_event=_stop_event)
     results = runner.run_all(plans)
     
     # Print summary
@@ -73,6 +100,10 @@ def cmd_run(args):
     logger.info(f"Successful: {results['successful_runs']}")
     logger.info(f"Failed: {results['failed_runs']}")
     
+    if _stop_event.is_set():
+        logger.info("Run was interrupted — checkpoint(s) saved, resume by re-running the same command.")
+        return 130
+
     if results['failed_runs'] > 0:
         logger.warning("Some runs failed. Check logs for details.")
         return 1
@@ -228,7 +259,7 @@ def main():
         return args.func(args)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-        return 1
+        return 130
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         return 1

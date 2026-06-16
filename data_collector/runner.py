@@ -86,10 +86,13 @@ def extract_extra_fields(response_json: str, extract_config: Dict[str, str]) -> 
 class BenchmarkRunner:
     """Execute benchmark runs with concurrent processing"""
 
-    def __init__(self, config: BenchmarkConfig, storage: ResultsStorage):
+    def __init__(self, config: BenchmarkConfig, storage: ResultsStorage,
+                 stop_event: Optional[threading.Event] = None):
         self.config = config
         self.storage = storage
         self.evaluator_factory = EvaluatorFactory(grader_cache_config=config.grader_cache_config)
+        # stop_event is set by CLI when user presses Ctrl+C (first press = graceful)
+        self.stop_event = stop_event or threading.Event()
     
     def run_all(self, plans: List[RunPlan]) -> Dict[str, Any]:
         """Execute all planned runs"""
@@ -415,8 +418,37 @@ class BenchmarkRunner:
 
         def process_single_record(record_data: Dict[str, Any], index: int, startup_delay: float = 0.0) -> RecordResult:
             """Process a single record"""
+            # ── Early-exit if stop was requested ───────────────────
+            if self.stop_event.is_set():
+                return RecordResult(
+                    index=index + 1,
+                    origin_query=record_data.get('origin_query', record_data.get('question', '')),
+                    prompt=record_data.get('prompt', record_data.get('formatted_prompt', '')),
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    cost=0.0,
+                    score=None,
+                    prediction="",
+                    ground_truth="",
+                    raw_output="Processing failed: cancelled by user",
+                    processing_time=0.0
+                )
             if startup_delay > 0:
-                time.sleep(startup_delay)
+                # Honour stop_event during staggered startup delay
+                if self.stop_event.wait(timeout=startup_delay):
+                    return RecordResult(
+                        index=index + 1,
+                        origin_query=record_data.get('origin_query', record_data.get('question', '')),
+                        prompt=record_data.get('prompt', record_data.get('formatted_prompt', '')),
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        cost=0.0,
+                        score=None,
+                        prediction="",
+                        ground_truth="",
+                        raw_output="Processing failed: cancelled by user",
+                        processing_time=0.0
+                    )
             thread_name = threading.current_thread().name
             start_ts = time.time()
             try:
@@ -503,6 +535,7 @@ class BenchmarkRunner:
         completed_this_run = 0
         last_checkpoint_time = time.time()
         records_since_checkpoint = 0
+        interrupted = False
 
         # ── Execute concurrently with progress tracking ─────────────
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -521,6 +554,19 @@ class BenchmarkRunner:
             # Collect results with progress bar (show total, start from skipped)
             with tqdm(total=total_count, initial=skipped, desc="Processing records", unit="record") as pbar:
                 for future in as_completed(future_to_index):
+                    # ── Check for user-requested stop ───────────────
+                    if self.stop_event.is_set() and not interrupted:
+                        interrupted = True
+                        logger.warning(
+                            "Stop requested — cancelling pending tasks and saving checkpoint ..."
+                        )
+                        # Cancel futures that haven't started yet
+                        for f in future_to_index:
+                            f.cancel()
+                        # Don't wait for in-flight workers to finish naturally;
+                        # shutdown(wait=False) lets them finish but we stop collecting.
+                        executor.shutdown(wait=False, cancel_futures=True)
+
                     idx = future_to_index[future]
                     try:
                         result = future.result()
@@ -559,9 +605,16 @@ class BenchmarkRunner:
                             last_checkpoint_time = now
                             records_since_checkpoint = 0
 
-        # ── Final checkpoint (in case last batch didn't trigger) ────
-        if use_checkpoint and records_since_checkpoint > 0:
+                    # Break the collection loop once stop is confirmed so we
+                    # don't block forever waiting on remaining in-flight tasks.
+                    if interrupted:
+                        break
+
+        # ── Final checkpoint (in case last batch didn't trigger or interrupted) ──
+        if use_checkpoint and (records_since_checkpoint > 0 or interrupted):
             self._save_checkpoint(results, dataset_id, split, model_name, total_count)
+            if interrupted:
+                logger.info("Checkpoint saved after interrupt. Re-run the same command to resume.")
 
         return results  # type: ignore[return-value]
     

@@ -19,6 +19,39 @@ class NonRetryableError(Exception):
     pass
 
 
+class CancelledError(NonRetryableError):
+    """Raised when the global stop_event is set — stops tenacity retry immediately."""
+    pass
+
+
+def _check_stop_and_log(retry_state, generator_label: str = "Generator") -> None:
+    """
+    Shared before_sleep callback for all generator retry decorators.
+    - If the global stop_event is set, raises CancelledError (a NonRetryableError)
+      so tenacity stops retrying immediately without further sleep.
+    - Otherwise logs the retry attempt as a warning.
+
+    Usage in @retry decorator:
+        before_sleep=lambda rs: _check_stop_and_log(rs, "DirectGenerator")
+    """
+    from generators import stop_event as _global_stop
+    exception = retry_state.outcome.exception()
+    thread_name = threading.current_thread().name
+
+    if _global_stop.is_set():
+        logger.warning(
+            f"[{thread_name}] Stop requested — aborting {generator_label} retry "
+            f"(attempt {retry_state.attempt_number})"
+        )
+        raise CancelledError("Cancelled by user stop request")
+
+    if exception:
+        logger.warning(
+            f"[{thread_name}] Retrying {generator_label} due to: {str(exception)}. "
+            f"Attempt {retry_state.attempt_number}/5"
+        )
+
+
 @dataclass
 class GeneratorOutput:
     output: str
@@ -79,19 +112,14 @@ class DirectGenerator:
             )
     
     def _log_retry(self, retry_state):
-        exception = retry_state.outcome.exception()
-        if exception:
-            thread_name = threading.current_thread().name
-            logger.warning(
-                f"[{thread_name}] Retrying DirectGenerator.generate due to error: {str(exception)}. "
-                f"Attempt {retry_state.attempt_number}/5"
-            )
+        """Kept for backward compatibility — delegates to module-level helper."""
+        _check_stop_and_log(retry_state, f"DirectGenerator({self.model_name})")
     
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_not_exception_type(NonRetryableError),
-        before_sleep=lambda retry_state: DirectGenerator._log_retry(None, retry_state)
+        before_sleep=lambda retry_state: _check_stop_and_log(retry_state, "DirectGenerator")
     )
     def _generate(self, question: str) -> GeneratorOutput:
         try:
